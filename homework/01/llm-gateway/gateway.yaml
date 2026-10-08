@@ -1,0 +1,120 @@
+# Gateway 配置：供应商端点 / 逻辑模型 / 租户策略 / 韧性参数
+#
+# 训练目标：同一供应商(DeepSeek)的两个模型走两种差异最大的协议 ——
+#   DeepSeek v4 pro   -> OpenAI Responses API  (/responses)
+#   DeepSeek v4 flash -> Anthropic Messages API (/v1/messages)
+server:
+  host: 0.0.0.0
+  port: 8080
+
+database:
+  path: data/gateway.db
+
+# ---------------------------------------------------------------- 网关接入鉴权
+# enabled=false 时完全放行（本地开发）。生产置 true，key 从环境变量读取，支持逗号分隔多个。
+auth:
+  enabled: false
+  api_key_envs: [GATEWAY_KEYS]
+
+# ---------------------------------------------------------------- 供应商端点
+# provider 按协议分两条配置；endpoint 是路由与熔断的最小单元。
+providers:
+  - id: deepseek-responses
+    enabled: true
+    protocol: openai_responses
+    base_url: https://api.deepseek.com
+    api_path: /responses
+    auth:
+      type: bearer
+      env: DEEPSEEK_API_KEY
+    endpoints:
+      - id: ds-v4-pro
+        actual_model: deepseek-v4-pro
+        capabilities: [streaming, structured_output, tool_calling]
+        regions: [cn]
+        data_residency: cn
+        max_output_tokens: 8192
+        price: { input_per_1m: 4.5, output_per_1m: 13.5, cached_per_1m: 0.15 }
+
+  - id: deepseek-anthropic
+    enabled: true
+    protocol: anthropic
+    base_url: https://api.deepseek.com
+    api_path: /anthropic/v1/messages
+    auth:
+      type: x_api_key
+      env: DEEPSEEK_API_KEY          # 同一密钥，鉴权头不同以体现协议差异
+    endpoints:
+      - id: ds-v4-flash
+        actual_model: deepseek-v4-flash
+        capabilities: [streaming, structured_output, tool_calling]
+        regions: [cn]
+        data_residency: cn
+        max_output_tokens: 8192
+        price: { input_per_1m: 1, output_per_1m: 4, cached_per_1m: 0.02 }
+
+# ---------------------------------------------------------------- 逻辑模型
+# 逻辑模型 -> 候选 endpoint；priority 越小越优先，weight 用于同优先级分摊。
+logical_models:
+  - id: premium-chat                 # 强能力：首选 Responses 协议的 v4 pro
+    endpoints:
+      - { endpoint: ds-v4-pro,   priority: 10, weight: 1 }
+      - { endpoint: ds-v4-flash, priority: 20, weight: 1 }
+  - id: standard-chat                # 低成本：首选 Anthropic 协议的 v4 flash
+    endpoints:
+      - { endpoint: ds-v4-flash, priority: 10, weight: 1 }
+      - { endpoint: ds-v4-pro,   priority: 20, weight: 1 }
+  - id: standard-json
+    endpoints:
+      - { endpoint: ds-v4-flash, priority: 10, weight: 1 }
+      - { endpoint: ds-v4-pro,   priority: 20, weight: 1 }
+  # 同优先级、不同权重：配合 routing.strategy=weighted_round_robin 做流量分摊
+  - id: balanced-chat
+    endpoints:
+      - { endpoint: ds-v4-flash, priority: 10, weight: 3 }
+      - { endpoint: ds-v4-pro,   priority: 10, weight: 1 }
+
+# ---------------------------------------------------------------- 租户策略
+tenants:
+  - id: default                            # 租户唯一标识；请求头 X-Tenant-Id 匹配此项，缺省为 default
+    budget_limit_usd: 100.0                # 租户预算上限（美元）；累计花费达到后请求被记 tenant_budget_exhausted
+    allowed_regions: [cn, us]              # 允许调用的端点区域白名单；为空则不限制（region_allowed）
+    data_residency: any                    # 数据驻留要求 any|cn|global；非 any 时端点驻留须一致
+    max_concurrency_per_endpoint: 8        # 单租户对单个端点的最大同时在途请求数（并发闸）
+    rate_limit:                            # 租户默认限流配额：每个逻辑模型各独立一个令牌桶
+      enabled: true                        # 是否启用限流；false 完全放行
+      requests_per_minute: 600             # 每分钟允许请求数（决定令牌补充速率 rpm/60）
+      burst: 20                            # 令牌桶容量/允许的瞬时突发请求数
+    model_rate_limits:                     # 按逻辑模型单独覆盖配额；未列出的模型回退上方 rate_limit
+      premium-chat:                        # 逻辑模型名（高端模型单独收紧配额）
+        enabled: true                      # 是否启用该模型限流
+        requests_per_minute: 120           # 该模型每分钟允许请求数
+        burst: 5                           # 该模型令牌桶突发容量
+
+# ---------------------------------------------------------------- 韧性参数
+resilience:
+  max_attempts: 3                    # 单次请求最大尝试次数（含首次）；执行循环上限，受 fallback 链长度共同约束
+  total_timeout_ms: 30000            # 整条请求（含所有重试）的总超时预算；TimeoutBudget 从它扣除每次尝试耗时
+  connect_timeout_ms: 3000           # 单次 TCP 建连/拿连接的超时；也作为“剩余预算是否还够再试一次”的判断下限
+  ttft_timeout_ms: 12000             # 流式首 token 超时：建连后该时间内未收到首块即判 TTFT 超时并可重试
+  retry:                             # 重试策略：仅对可重试错误且在 fallback 链内切换端点
+    max_retries: 2                   # 首次之外最多重试次数（max_attempts - 1）
+    retryable_status: [408, 409, 429, 500, 502, 503, 504]  # 命中这些上游 HTTP 状态码才重试
+    backoff_base_ms: 200             # 指数退避基数：第 n 次退避 = base * 2^(n-1)
+    backoff_max_ms: 2000             # 退避上限（封顶值），防止重试间隔无限增大
+  circuit:                           # 熔断器：closed -> open -> half_open -> closed
+    failure_threshold: 5             # 滚动窗口内失败次数达到该值即熔断（open），后续请求直接记 circuit_open
+    cooldown_seconds: 30             # open 持续秒数；过后转 half_open 放探测
+    half_open_probe: 1               # half_open 阶段允许同时放行的探测请求数，成功则关闭熔断
+
+# ---------------------------------------------------------------- 评分权重
+scoring:
+  weight_health: 0.4
+  weight_priority: 0.3
+  weight_cost: 0.2
+  weight_load: 0.1
+
+# ---------------------------------------------------------------- 首选选择策略
+# score：综合评分取最高（默认）；weighted_round_robin：同优先级内按 weight 平滑加权轮询
+routing:
+  strategy: score
