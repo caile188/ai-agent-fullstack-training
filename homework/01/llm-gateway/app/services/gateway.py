@@ -12,6 +12,8 @@ import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from pydantic import ValidationError
+
 from app.api.schemas import ChatCompletionRequest
 from app.config import GatewayConfig
 from app.core.errors import GatewayError
@@ -28,9 +30,8 @@ from app.core.prompts.render import render_system
 from app.core.prompts.versions import PromptVersion
 from app.core.router.decision import RouteDecision
 from app.core.router.pipeline import RouterPipeline
-from app.core.streaming import DELTA, ERROR, FINISH, USAGE, StreamEvent
+from app.core.streaming import ERROR, FINISH, USAGE, StreamEvent
 from app.core.validation.structured import repair_instruction, strip_fence, validate_output
-from app.core.validation.streaming_json import JsonPrefix, classify_json_prefix
 from app.services.db.repositories import Repository
 from app.services.execution.budget import TimeoutBudget
 from app.services.execution.concurrency import ConcurrencyLimiter
@@ -131,18 +132,26 @@ class GatewayService:
                 parameters_json_schema=fn.get("parameters", {}),
             ))
 
-        req = ChatRequest(
-            requested_model=model,
-            messages=messages,
-            stream=payload.stream,
-            params=GenerationParams(**{k: v for k, v in params_kwargs.items() if v is not None}),
-            tools=tools,
-            tenant_id=tenant_id,
-            prompt_name=payload.prompt.name if payload.prompt else None,
-            prompt_version=prompt_version.version if prompt_version else None,
-            prompt_hash=prompt_version.content_hash if prompt_version else None,
-            idempotency_key=payload.idempotency_key,
-        )
+        try:
+            req = ChatRequest(
+                requested_model=model,
+                messages=messages,
+                stream=payload.stream,
+                params=GenerationParams(**{k: v for k, v in params_kwargs.items() if v is not None}),
+                tools=tools,
+                tenant_id=tenant_id,
+                prompt_name=payload.prompt.name if payload.prompt else None,
+                prompt_version=prompt_version.version if prompt_version else None,
+                prompt_hash=prompt_version.content_hash if prompt_version else None,
+                idempotency_key=payload.idempotency_key,
+            )
+        except ValidationError as err:
+            # 领域模型保持中性、只抛 Pydantic 校验错误；此处统一转译为稳定网关错误码
+            raise GatewayError(
+                "VALIDATION_BAD_REQUEST",
+                "; ".join(e["msg"] for e in err.errors()),
+                details={"reason": "stream_conflicts_with_response_schema"},
+            ) from err
         return req, prompt_version
 
     # ==================================================== 非流式
@@ -264,12 +273,9 @@ class GatewayService:
         tracer.attempts = records
 
         async def _out() -> AsyncIterator[StreamEvent]:
-            # 流式结构化：中途 JSON 不完整绝不校验/执行，先攒批，在终态对完整文本做一次出口校验
-            rf = req.params.response_format
-            parts: list[str] = []
+            # 流式不支持结构化输出（入口已拒绝 stream + response_format）：仅透传事件
             latest_usage = _empty_usage()
             finished: StreamEvent | None = None
-            validation = "skipped:stream" if rf is None else "pending"
             terminal_err: GatewayError | None = None
             cancel_exc: asyncio.CancelledError | None = None
             try:
@@ -284,34 +290,9 @@ class GatewayService:
                     if evt.type == USAGE and evt.usage is not None:
                         # 上游用量为累计快照；门开后中断时据此对已处理 token 计费
                         latest_usage = evt.usage
-                    if evt.type == DELTA and evt.text:
-                        parts.append(evt.text)
-                        # 增量可行性检查：仅识别"确定不可恢复"以提前止损；
-                        # 不完整前缀继续等待，Schema 校验仍只在终态做一次
-                        if rf is not None and classify_json_prefix("".join(parts)) is JsonPrefix.BROKEN:
-                            terminal_err = GatewayError(
-                                "OUTPUT_INVALID_JSON",
-                                "streamed JSON became syntactically unrecoverable",
-                            )
-                            yield StreamEvent.error(
-                                terminal_err.code, terminal_err.message or "invalid JSON"
-                            )
-                            return
                     if evt.type == FINISH:
                         finished = evt
                         tracer.mark("first_token")
-                        if rf is not None:
-                            result = validate_output("".join(parts), rf)
-                            if result is not None and not result.ok:
-                                code = ("OUTPUT_INVALID_JSON" if result.error
-                                        and result.error.startswith("invalid JSON")
-                                        else "OUTPUT_SCHEMA_VIOLATION")
-                                terminal_err = GatewayError(code, result.error)
-                                # 脏输出已计费：先记账，再以唯一错误终态告知客户端（不发 finish）
-                                yield StreamEvent.error(terminal_err.code,
-                                                        terminal_err.message or "output validation failed")
-                                return
-                            validation = "pass"
                     if evt.type == ERROR and finished is None:
                         # 适配器解析到上游 error 事件：唯一错误终态，不再继续消费
                         terminal_err = GatewayError(
@@ -337,7 +318,7 @@ class GatewayService:
                     await pipe.aclose()
                 await self._finalize_stream(
                     ctx, req, records, tracer, decision, prompt_meta,
-                    finished, latest_usage, validation, terminal_err,
+                    finished, latest_usage, "skipped:stream", terminal_err,
                 )
             if cancel_exc is not None:
                 raise cancel_exc

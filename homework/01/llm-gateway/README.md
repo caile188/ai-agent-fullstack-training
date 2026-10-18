@@ -36,9 +36,9 @@ SSE 每帧的元数据同样放在帧内 `gateway` 对象中。
 4. **结构化输出**：
    - 非流式：出口 JSON/Schema 校验，失败在**同一端点**做有限次 repair 重生成
      （不重试、不 fallback、不拼接文本），额外调用独立计费。
-   - 流式：中途不校验半片 JSON，仅做增量语法可行性分类（确定不可恢复即提前
-     止损），终态对完整文本做**一次**出口校验；脏输出是唯一错误终态（取代
-     finish），且已产出 token 仍计费（不 repair）。
+   - 流式不支持结构化输出：`stream` 与 `response_format` 互斥（使用带
+     `output_schema` 的 Prompt 时亦然），同时出现于请求校验期直接拒绝
+     （`VALIDATION_BAD_REQUEST`，400）。结构化输出请走非流式。
    - 流式唯一终态：finish / error / **cancelled** 三者居其一。客户端断连
      （ASGI 取消或 `is_disconnected` 探活）落 `CLIENT_CANCELLED`(499) 终态，
      已产出 token 同样计费，随后保持取消语义。

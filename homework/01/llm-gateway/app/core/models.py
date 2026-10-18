@@ -12,7 +12,7 @@ from __future__ import annotations
 import enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Role(str, enum.Enum):
@@ -81,6 +81,12 @@ class ChatRequest(BaseModel):
     # 幂等：贯穿重试与 fallback
     idempotency_key: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _reject_stream_with_response_format(self) -> "ChatRequest":
+        if self.stream and self.params.response_format is not None:
+            raise ValueError("stream and response_format cannot be used together")
+        return self
 
     @property
     def logical_model(self) -> str:
