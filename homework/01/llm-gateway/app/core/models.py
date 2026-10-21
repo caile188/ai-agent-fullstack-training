@@ -74,7 +74,8 @@ class ChatRequest(BaseModel):
     params: GenerationParams = Field(default_factory=GenerationParams)
     tools: list[ToolSpec] = Field(default_factory=list)
     tenant_id: str = "default"
-    # Prompt 合约溯源
+    # Prompt 合约溯源：name+version 定位合约版本；prompt_hash 是本次实际渲染
+    # 内容（system 含 few-shot + user 数据帧）的指纹，每次调用可能不同
     prompt_name: str | None = None
     prompt_version: str | None = None
     prompt_hash: str | None = None

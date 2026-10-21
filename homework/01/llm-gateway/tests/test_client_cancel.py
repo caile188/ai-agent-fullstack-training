@@ -22,7 +22,7 @@ async def _assert_cancelled_and_billed(svc) -> None:
     assert t["error_code"] == "CLIENT_CANCELLED"
     # message_start 已上报 8 个 input token：断连不影响已产出成本落账
     async with svc.db.conn.execute(
-        "SELECT COUNT(*) AS n FROM cost_ledger WHERE trace_id=?", (t["trace_id"],)
+        "SELECT COUNT(*) AS n FROM cost_ledger WHERE request_id=?", (t["request_id"],)
     ) as cur:
         row = await cur.fetchone()
     assert row["n"] == 1

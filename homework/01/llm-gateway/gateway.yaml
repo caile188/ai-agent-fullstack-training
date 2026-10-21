@@ -10,6 +10,9 @@ server:
 database:
   path: data/gateway.db
 
+# SSE 空闲心跳间隔（秒）：流式无事件期间定时下发 ": heartbeat" 防代理掐断；0 关闭
+sse_heartbeat_seconds: 15
+
 # ---------------------------------------------------------------- 网关接入鉴权
 # enabled=false 时完全放行（本地开发）。生产置 true，key 从环境变量读取，支持逗号分隔多个。
 auth:
@@ -22,10 +25,9 @@ providers:
   - id: deepseek-responses
     enabled: true
     protocol: openai_responses
+    # OpenAI SDK 自动在 base_url 后拼 /responses
     base_url: https://api.deepseek.com
-    api_path: /responses
     auth:
-      type: bearer
       env: DEEPSEEK_API_KEY
     endpoints:
       - id: ds-v4-pro
@@ -39,11 +41,10 @@ providers:
   - id: deepseek-anthropic
     enabled: true
     protocol: anthropic
-    base_url: https://api.deepseek.com
-    api_path: /anthropic/v1/messages
+    # Anthropic SDK 自动在 base_url 后拼 /v1/messages；DeepSeek 兼容前缀并入 base_url
+    base_url: https://api.deepseek.com/anthropic
     auth:
-      type: x_api_key
-      env: DEEPSEEK_API_KEY          # 同一密钥，鉴权头不同以体现协议差异
+      env: DEEPSEEK_API_KEY          # 同一密钥，SDK 按协议自动使用 x-api-key 头
     endpoints:
       - id: ds-v4-flash
         actual_model: deepseek-v4-flash

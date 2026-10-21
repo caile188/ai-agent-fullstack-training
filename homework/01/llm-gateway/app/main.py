@@ -17,12 +17,11 @@ async def lifespan(app: FastAPI):
     config_path = os.environ.get("GATEWAY_CONFIG", "gateway.yaml")
     services = build_services(config_path)
     await services.db.connect()
-    await services.engine.startup()
     app.state.services = services
     try:
         yield
     finally:
-        await services.engine.shutdown()
+        await services.registry.aclose()
         await services.db.close()
 
 

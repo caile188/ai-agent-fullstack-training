@@ -83,7 +83,7 @@ async def chat_completions(
             payload, tenant_id, is_disconnected=request.is_disconnected
         )
         return StreamingResponse(
-            to_sse(event_iter),
+            to_sse(event_iter, heartbeat_seconds=svc.gateway.config.sse_heartbeat_seconds),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

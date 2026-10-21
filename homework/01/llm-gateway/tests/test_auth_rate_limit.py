@@ -122,7 +122,7 @@ def test_auth_accepts_configured_key(monkeypatch):
         services.config.auth = GatewayAuthConfig(
             enabled=True, api_key_envs=["GATEWAY_KEYS"]
         )
-        services.engine._client = FakeUpstream().client()   # 不触真实网络
+        FakeUpstream().attach(services.registry)   # 不触真实网络
         r = c.post("/v1/chat/completions", json=payload,
                    headers={"Authorization": "Bearer good-key"})
         assert r.status_code == 200

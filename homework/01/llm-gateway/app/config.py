@@ -35,7 +35,7 @@ def _expand_env(value: object) -> object:
 class AuthConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    type: Literal["bearer", "x_api_key"]
+    # 鉴权头形状由各协议 SDK 自行决定（Bearer / x-api-key），这里只提供密钥来源
     env: str
 
     def api_key(self) -> SecretStr:
@@ -81,13 +81,12 @@ class ProviderConfig(BaseModel):
     id: str
     enabled: bool = True
     protocol: Literal["openai_responses", "anthropic"]
+    # SDK 固定路径后缀（/responses、/v1/messages）；兼容端点的路径前缀并入 base_url
     base_url: str
-    api_path: str = ""
     auth: AuthConfig
     endpoints: list[EndpointConfig]
-    # 可选 provider 级覆盖（缺省回退全局 resilience 预算）
+    # 可选 provider 级单次调用总时长上限（缺省回退全局 resilience 预算）
     request_timeout_seconds: float | None = Field(default=None, gt=0)
-    connect_timeout_seconds: float | None = Field(default=None, gt=0)
     extra_headers: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("base_url")
@@ -219,6 +218,8 @@ class RawConfig(BaseModel):
     auth: GatewayAuthConfig = Field(default_factory=GatewayAuthConfig)
     # 非流式结构化输出校验失败后的修复重生成次数（仅非流式）
     structured_output_retries: int = Field(default=1, ge=0, le=3)
+    # SSE 空闲心跳间隔（秒）：无事件期间定时发 ": heartbeat" 防代理掐断；0 表示关闭
+    sse_heartbeat_seconds: float = Field(default=15.0, ge=0)
     providers: list[ProviderConfig]
     logical_models: list[LogicalModelConfig]
     tenants: list[TenantConfig]
@@ -242,6 +243,7 @@ class GatewayConfig:
         self.routing = raw.routing
         self.auth = raw.auth
         self.structured_output_retries = raw.structured_output_retries
+        self.sse_heartbeat_seconds = raw.sse_heartbeat_seconds
 
         self.providers: dict[str, ProviderConfig] = {}
         self.endpoints: dict[str, EndpointConfig] = {}

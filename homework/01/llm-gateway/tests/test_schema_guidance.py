@@ -31,23 +31,23 @@ async def test_anthropic_json_schema_injected_into_system(harness):
         "properties": {"answer": {"type": "string"}},
         "required": ["answer"],
     }
-    _, _, _, body = adapter.build_http(
+    kwargs = adapter.build_kwargs(
         _request(ResponseFormat(type="json_schema", json_schema=schema)),
         endpoint,
         stream=False,
     )
-    assert "JSON Schema" in body["system"]
-    assert "answer" in body["system"]
+    assert "JSON Schema" in kwargs["system"]
+    assert "answer" in kwargs["system"]
 
 
 async def test_anthropic_json_object_guidance_unchanged(harness):
     svc, fake = harness
     adapter = svc.registry.adapter_for("ds-v4-flash")
     endpoint = svc.registry.endpoint("ds-v4-flash")
-    _, _, _, body = adapter.build_http(
+    kwargs = adapter.build_kwargs(
         _request(ResponseFormat(type="json_object")), endpoint, stream=False
     )
-    assert body["system"] == "Respond with a single valid JSON object and no prose."
+    assert kwargs["system"] == "Respond with a single valid JSON object and no prose."
 
 
 async def test_responses_protocol_uses_native_text_format(harness):
@@ -56,11 +56,11 @@ async def test_responses_protocol_uses_native_text_format(harness):
     adapter = svc.registry.adapter_for("ds-v4-pro")
     endpoint = svc.registry.endpoint("ds-v4-pro")
     schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
-    _, _, _, body = adapter.build_http(
+    kwargs = adapter.build_kwargs(
         _request(ResponseFormat(type="json_schema", json_schema=schema)),
         endpoint,
         stream=False,
     )
-    assert body["text"]["format"]["type"] == "json_schema"
-    assert body["text"]["format"]["json_schema"] == schema
-    assert "instructions" not in body
+    assert kwargs["text"]["format"]["type"] == "json_schema"
+    assert kwargs["text"]["format"]["json_schema"] == schema
+    assert "instructions" not in kwargs

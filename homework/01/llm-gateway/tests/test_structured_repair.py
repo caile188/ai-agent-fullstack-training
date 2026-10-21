@@ -8,9 +8,9 @@ from app.core.errors import GatewayError
 from tests.conftest import make_request
 
 
-async def _cost_rows(svc, trace_id: str) -> list[dict]:
+async def _cost_rows(svc, request_id: str) -> list[dict]:
     async with svc.db.conn.execute(
-        "SELECT * FROM cost_ledger WHERE trace_id=? ORDER BY id", (trace_id,)
+        "SELECT * FROM cost_ledger WHERE request_id=? ORDER BY id", (request_id,)
     ) as cur:
         return [dict(r) for r in await cur.fetchall()]
 
@@ -36,11 +36,11 @@ async def test_repair_then_pass(harness):
     assert t["endpoint_id"] == "ds-v4-flash"
     assert t["fallback_from"] is None
 
-    calls = await svc.repo.get_trace_calls(t["trace_id"])
+    calls = await svc.repo.get_trace_calls(t["request_id"])
     assert len(calls) == 2
     assert {c["endpoint_id"] for c in calls} == {"ds-v4-flash"}
     # 两次调用都产生了 token，故都进入成本台账
-    costs = await _cost_rows(svc, t["trace_id"])
+    costs = await _cost_rows(svc, t["request_id"])
     assert len(costs) == 2
 
 
@@ -67,7 +67,7 @@ async def test_repair_exhausted_still_rejects_and_bills(harness):
     assert t["terminal_status"] == "failed"
     assert t["structured_repairs"] == 1
     # 即使最终失败，已产生的上游调用与费用仍落库
-    calls = await svc.repo.get_trace_calls(t["trace_id"])
+    calls = await svc.repo.get_trace_calls(t["request_id"])
     assert len(calls) == 2
-    costs = await _cost_rows(svc, t["trace_id"])
+    costs = await _cost_rows(svc, t["request_id"])
     assert len(costs) == 2

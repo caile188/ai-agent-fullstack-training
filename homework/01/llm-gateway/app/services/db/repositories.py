@@ -41,16 +41,17 @@ class Repository:
         d = pv.model_dump(mode="json")
         await self.conn.execute(
             """INSERT INTO prompt_versions
-            (package_id, version, status, content_hash, system_template, variables_schema,
-             few_shot_json, output_schema, tool_versions, default_logical_model,
-             generation_params, context_budget, eval_set_json, eval_threshold, changelog)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (package_id, version, status, system_template, user_template,
+             variables_schema, few_shot_json, output_schema, tool_versions,
+             default_logical_model, generation_params, context_budget, max_variable_chars,
+             eval_set_json, eval_threshold, changelog)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 package_id,
                 pv.version,
                 d["status"],
-                pv.content_hash,
                 pv.system_template,
+                pv.user_template,
                 json.dumps(d["variables_schema"], ensure_ascii=False),
                 json.dumps(d["few_shot"], ensure_ascii=False),
                 json.dumps(d["output_schema"], ensure_ascii=False) if d["output_schema"] else None,
@@ -58,6 +59,7 @@ class Repository:
                 pv.default_logical_model,
                 json.dumps(d["generation_params"], ensure_ascii=False),
                 pv.context_budget,
+                pv.max_variable_chars,
                 json.dumps(d["eval_set"], ensure_ascii=False),
                 pv.eval_threshold,
                 pv.changelog,
@@ -88,7 +90,7 @@ class Repository:
 
     async def list_versions(self, name: str) -> list[dict[str, Any]]:
         async with self.conn.execute(
-            """SELECT v.version, v.status, v.content_hash, v.created_at
+            """SELECT v.version, v.status, v.created_at
                FROM prompt_versions v JOIN prompt_packages p ON p.id = v.package_id
                WHERE p.name=? ORDER BY v.id DESC""",
             (name,),
@@ -98,17 +100,17 @@ class Repository:
 
     # ============================================================ 路由决策
     async def insert_route_decision(
-        self, trace_id: str, decision: RouteDecision
+        self, request_id: str, decision: RouteDecision
     ) -> int:
         scores = [
             c.score.model_dump(mode="json") for c in decision.survivors if c.score is not None
         ]
         cur = await self.conn.execute(
             """INSERT INTO route_decisions
-            (trace_id, logical_model, request_caps, chosen_endpoint, score_snapshot, decision_json)
+            (request_id, logical_model, request_caps, chosen_endpoint, score_snapshot, decision_json)
             VALUES (?,?,?,?,?,?)""",
             (
-                trace_id,
+                request_id,
                 decision.logical_model,
                 json.dumps(decision.required_capabilities),
                 decision.chosen_endpoint_id,
@@ -131,19 +133,19 @@ class Repository:
         last = t.attempts[-1] if t.attempts else None
         await self.conn.execute(
             """INSERT OR REPLACE INTO traces
-            (trace_id, run_id, tenant_id, requested_model, provider_id, endpoint_id, resolved_model,
+            (request_id, tenant_id, requested_model, provider_id, endpoint_id, resolved_model,
              prompt_name, prompt_version, prompt_hash, schema_version, stream,
-             queue_ms, render_ms, route_ms, connect_ms, ttft_ms, generation_ms, total_ms,
+             queue_ms, render_ms, route_ms, ttft_ms, generation_ms, total_ms,
              attempt, retries, structured_repairs, fallback_from, timeout_budget_ms,
              finish_reason, terminal_status, output_validation,
              error_code, error_stage, http_status, upstream_request_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                t.trace_id, t.run_id, t.tenant_id, t.requested_model,
+                t.request_id, t.tenant_id, t.requested_model,
                 t.provider_id, t.endpoint_id, t.resolved_model,
                 t.prompt_name, t.prompt_version, t.prompt_hash, t.schema_version,
                 int(t.stream),
-                t.queue_ms, t.render_ms, t.route_ms, t.connect_ms,
+                t.queue_ms, t.render_ms, t.route_ms,
                 t.ttft_ms, t.generation_ms, t.total_ms,
                 len(t.attempts), t.retries, t.structured_repairs,
                 (last.fallback_from if last else None) or t.fallback_from,
@@ -157,16 +159,16 @@ class Repository:
     async def insert_call(self, c: CallRecord) -> None:
         await self.conn.execute(
             """INSERT INTO trace_calls
-            (call_id, trace_id, run_id, step_id, attempt, endpoint_id, request_hash,
+            (call_id, request_id, step_id, attempt, endpoint_id, request_hash,
              input_tokens, output_tokens, cached_tokens, reasoning_tokens,
-             connect_ms, ttft_ms, http_status, upstream_request_id, error_code)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             ttft_ms, http_status, upstream_request_id, error_code)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                c.call_id, c.trace_id, c.run_id, c.step_id, c.attempt, c.endpoint_id,
+                c.call_id, c.request_id, c.step_id, c.attempt, c.endpoint_id,
                 c.request_hash,
                 c.usage.input_tokens, c.usage.output_tokens,
                 c.usage.cached_tokens, c.usage.reasoning_tokens,
-                c.connect_ms, c.ttft_ms, c.http_status, c.upstream_request_id, c.error_code,
+                c.ttft_ms, c.http_status, c.upstream_request_id, c.error_code,
             ),
         )
         await self.conn.commit()
@@ -174,11 +176,11 @@ class Repository:
     async def insert_cost(self, cr: CostRecord) -> None:
         await self.conn.execute(
             """INSERT INTO cost_ledger
-            (trace_id, call_id, tenant_id, input_cost, output_cost, cached_cost,
+            (request_id, call_id, tenant_id, input_cost, output_cost, cached_cost,
              total_cost, currency, price_version)
             VALUES (?,?,?,?,?,?,?,?,?)""",
             (
-                cr.trace_id, cr.call_id, cr.tenant_id,
+                cr.request_id, cr.call_id, cr.tenant_id,
                 cr.cost.input_cost, cr.cost.output_cost, cr.cost.cached_cost,
                 cr.cost.total, cr.currency, cr.price_version,
             ),
@@ -211,14 +213,14 @@ class Repository:
         return dict(row) if row else None
 
     async def insert_idempotency_pending(
-        self, tenant_id: str, key: str, request_hash: str, trace_id: str
+        self, tenant_id: str, key: str, request_hash: str, request_id: str
     ) -> bool:
         """占位。返回 True 表示本次成功占位（可执行）；False 表示 key 已存在。"""
         try:
             await self.conn.execute(
                 "INSERT INTO idempotency_keys"
-                "(tenant_id, idempotency_key, request_hash, trace_id, status) VALUES (?,?,?,?,'pending')",
-                (tenant_id, key, request_hash, trace_id),
+                "(tenant_id, idempotency_key, request_hash, request_id, status) VALUES (?,?,?,?,'pending')",
+                (tenant_id, key, request_hash, request_id),
             )
             await self.conn.commit()
             return True
@@ -243,22 +245,22 @@ class Repository:
         )
         await self.conn.commit()
 
-    async def get_trace(self, trace_id: str) -> dict[str, Any] | None:
+    async def get_trace(self, request_id: str) -> dict[str, Any] | None:
         async with self.conn.execute(
-            "SELECT * FROM traces WHERE trace_id=?", (trace_id,)
+            "SELECT * FROM traces WHERE request_id=?", (request_id,)
         ) as cur:
             row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def get_trace_calls(self, trace_id: str) -> list[dict[str, Any]]:
+    async def get_trace_calls(self, request_id: str) -> list[dict[str, Any]]:
         async with self.conn.execute(
-            "SELECT * FROM trace_calls WHERE trace_id=? ORDER BY attempt", (trace_id,)
+            "SELECT * FROM trace_calls WHERE request_id=? ORDER BY attempt", (request_id,)
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
-    async def get_decision(self, trace_id: str) -> dict[str, Any] | None:
+    async def get_decision(self, request_id: str) -> dict[str, Any] | None:
         async with self.conn.execute(
-            "SELECT * FROM route_decisions WHERE trace_id=?", (trace_id,)
+            "SELECT * FROM route_decisions WHERE request_id=?", (request_id,)
         ) as cur:
             row = await cur.fetchone()
         if not row:

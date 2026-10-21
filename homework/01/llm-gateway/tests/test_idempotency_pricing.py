@@ -31,7 +31,7 @@ async def test_same_key_same_body_replays_without_second_call(harness):
 
     # 只有一条 call 记录（去重，不产生第二次调用记账）
     recent = await svc.repo.recent_traces(20)
-    calls = await svc.repo.get_trace_calls(recent[0]["trace_id"])
+    calls = await svc.repo.get_trace_calls(recent[0]["request_id"])
     assert len(calls) == 1
 
 
@@ -71,10 +71,10 @@ async def test_cost_bound_to_versioned_price_table(harness):
     svc, fake = harness
     await svc.gateway.chat(make_request("standard-chat"))
     recent = await svc.repo.recent_traces(1)
-    trace_id = recent[0]["trace_id"]
+    request_id = recent[0]["request_id"]
 
     async with svc.db.conn.execute(
-        "SELECT price_version, total_cost FROM cost_ledger WHERE trace_id=?", (trace_id,)
+        "SELECT price_version, total_cost FROM cost_ledger WHERE request_id=?", (request_id,)
     ) as cur:
         rows = [dict(r) for r in await cur.fetchall()]
     assert rows and all(r["price_version"].startswith("cfg_") for r in rows)

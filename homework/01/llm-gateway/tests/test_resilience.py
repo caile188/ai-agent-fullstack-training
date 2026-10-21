@@ -17,13 +17,13 @@ async def test_fallback_within_locked_chain(harness):
     recent = await svc.repo.recent_traces(1)
     t = recent[0]
     assert t["fallback_from"] == "ds-v4-flash"
-    calls = await svc.repo.get_trace_calls(t["trace_id"])
+    calls = await svc.repo.get_trace_calls(t["request_id"])
     endpoints = [c["endpoint_id"] for c in calls]
     assert endpoints == ["ds-v4-flash", "ds-v4-pro"]
     call_ids = [c["call_id"] for c in calls]
     assert all(cid.startswith("call_") for cid in call_ids)
     assert len(set(call_ids)) == len(call_ids)          # 稳定且唯一，非进程哈希
-    decision = await svc.repo.get_decision(t["trace_id"])
+    decision = await svc.repo.get_decision(t["request_id"])
     # 熔断的 flash 在本次之后被记录；决策时仍健康，故决策快照里两个候选都存活
     assert decision["chosen_endpoint"] == "ds-v4-flash"
 
@@ -38,7 +38,7 @@ async def test_circuit_opens_after_threshold(harness):
     resp = await svc.gateway.chat(make_request("standard-chat"))
     assert resp.endpoint_id == "ds-v4-pro"
     recent = await svc.repo.recent_traces(1)
-    decision = await svc.repo.get_decision(recent[0]["trace_id"])
+    decision = await svc.repo.get_decision(recent[0]["request_id"])
     assert decision["chosen_endpoint"] == "ds-v4-pro"
     reasons = {r["reason_code"] for r in decision["rejections"]}
     assert "circuit_open" in reasons

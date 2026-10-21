@@ -26,7 +26,8 @@ from app.core.models import (
     Role,
     ToolSpec,
 )
-from app.core.prompts.render import render_system
+from app.core.prompts.hashing import compute_rendered_hash
+from app.core.prompts.render import enforce_context_budget, render_system, render_user
 from app.core.prompts.versions import PromptVersion
 from app.core.router.decision import RouteDecision
 from app.core.router.pipeline import RouterPipeline
@@ -79,6 +80,7 @@ class GatewayService:
             "max_output_tokens": payload.max_tokens,
         }
         prompt_version: PromptVersion | None = None
+        rendered_prompt_hash: str | None = None
 
         if payload.prompt:
             # Prompt 合约独占 system：禁止调用方再用 messages 塞第二套 system prompt
@@ -90,8 +92,17 @@ class GatewayService:
                     details={"reason": "system_message_conflicts_with_prompt"},
                 )
             prompt_version = await self.prompts.resolve(payload.prompt.name, payload.prompt.version)
-            system_text = render_system(prompt_version, payload.prompt.variables)
+            # 规则/数据分层：system 帧只含静态规则与 few-shot 范例；
+            # 运行时变量只进独立 user 帧（标签分区写在 user_template 内）。
+            system_text = render_system(prompt_version)
+            user_text = render_user(prompt_version, payload.prompt.variables)
+            # 总预算在 system+user 两帧齐备后统一核算（单变量长度已在 render_user 拦过）
+            enforce_context_budget(prompt_version, system_text, user_text)
+            # 系统中唯一的 hash：本次实际渲染内容（system 含 few-shot + user 数据帧）的指纹
+            rendered_prompt_hash = compute_rendered_hash(system_text, user_text)
             messages = [Message(role=Role.SYSTEM, content=system_text)]
+            if user_text.strip():
+                messages.append(Message(role=Role.USER, content=user_text))
             # default_logical_model 仅作兜底：调用方显式传模型时尊重调用方；
             # 传占位值 "auto" 表示交由 Prompt 的默认模型决定
             if model == "auto":
@@ -115,7 +126,16 @@ class GatewayService:
         else:
             messages = []
 
-        messages.extend(_convert_messages(payload))
+        messages.extend(
+            m for m in _convert_messages(payload)
+            # 过滤纯空白的 user/assistant 消息（如评估注入的占位空消息）；
+            # tool 帧与携带 tool_calls 的消息即使无文本也必须保留
+            if not (
+                m.role in (Role.USER, Role.ASSISTANT)
+                and not m.content.strip()
+                and not m.tool_calls
+            )
+        )
 
         if payload.response_format and params_kwargs.get("response_format") is None:
             params_kwargs["response_format"] = ResponseFormat(
@@ -142,7 +162,7 @@ class GatewayService:
                 tenant_id=tenant_id,
                 prompt_name=payload.prompt.name if payload.prompt else None,
                 prompt_version=prompt_version.version if prompt_version else None,
-                prompt_hash=prompt_version.content_hash if prompt_version else None,
+                prompt_hash=rendered_prompt_hash,
                 idempotency_key=payload.idempotency_key,
             )
         except ValidationError as err:
@@ -178,7 +198,7 @@ class GatewayService:
             idem_key = req.idempotency_key
             if idem_key:
                 replay, acquired = await self._idempotency_begin(
-                    tenant_id, idem_key, _request_fingerprint(req), ctx.trace_id
+                    tenant_id, idem_key, _request_fingerprint(req), ctx.request_id
                 )
                 if replay is not None:
                     return replay
@@ -330,7 +350,7 @@ class GatewayService:
     # ==================================================== 记账辅助
     async def _persist_decision(self, ctx: TraceContext, decision: RouteDecision) -> None:
         try:
-            await self.repo.insert_route_decision(ctx.trace_id, decision)
+            await self.repo.insert_route_decision(ctx.request_id, decision)
         except Exception:
             pass  # 决策落库失败不阻断主链路
 
@@ -341,11 +361,10 @@ class GatewayService:
             call_id = new_call_id()
             step_id = f"step_{rec.attempt}_{rec.endpoint_id}"
             await self._safe_insert_call(CallRecord(
-                call_id=call_id, trace_id=ctx.trace_id, run_id=ctx.run_id, step_id=step_id,
+                call_id=call_id, request_id=ctx.request_id, step_id=step_id,
                 attempt=rec.attempt, endpoint_id=rec.endpoint_id,
                 request_hash=request_hash,
                 usage=rec.usage or _empty_usage(),
-                connect_ms=rec.connect_ms,
                 ttft_ms=rec.ttft_ms,
                 http_status=rec.http_status,
                 upstream_request_id=rec.upstream_request_id,
@@ -354,12 +373,12 @@ class GatewayService:
             # 上游确实产出 token 的调用都进入成本台账（含被校验拒绝的脏输出）
             if rec.http_status == 200 and rec.usage is not None:
                 cost = build_cost_record(self.registry, rec.endpoint_id, rec.usage,
-                                         call_id=call_id, trace_id=ctx.trace_id, tenant_id=ctx.tenant_id)
+                                         call_id=call_id, request_id=ctx.request_id, tenant_id=ctx.tenant_id)
                 cost.price_version = self.pricing.version
                 await self._safe_insert_cost(cost)
 
     async def _idempotency_begin(
-        self, tenant_id: str, key: str, request_hash: str, trace_id: str
+        self, tenant_id: str, key: str, request_hash: str, request_id: str
     ) -> tuple[ChatResponse | None, str | None]:
         """返回 (重放响应, 占位成功的 key)。命中冲突直接抛稳定错误码。"""
         existing = await self.repo.get_idempotency(tenant_id, key)
@@ -377,7 +396,7 @@ class GatewayService:
                 "request with this idempotency key is still being processed",
                 details={"idempotency_key": key},
             )
-        if await self.repo.insert_idempotency_pending(tenant_id, key, request_hash, trace_id):
+        if await self.repo.insert_idempotency_pending(tenant_id, key, request_hash, request_id):
             return None, key
         # 并发占位竞争：重读一次按既有记录裁决
         existing = await self.repo.get_idempotency(tenant_id, key)
@@ -458,6 +477,13 @@ class GatewayService:
         已拿到用量快照即视为可计费。中断时用配置中的实际模型构造影子响应。
         """
         tracer.mark("end")
+        # 纵深防御：连接读完但既无 finish 也无异常（上游静默截断、适配器漏发终态），
+        # 绝不能按成功收尾——唯一依据是 finish 终态事件，而非连接关闭。
+        if finished is None and terminal_err is None:
+            terminal_err = GatewayError(
+                "UPSTREAM_STREAM_INTERRUPTED",
+                "stream ended without a terminal finish event",
+            )
         live = next((r for r in reversed(records) if r.error_code is None), None)
         has_usage = bool(
             latest_usage and (latest_usage.input_tokens or latest_usage.output_tokens)
@@ -506,12 +532,11 @@ class GatewayService:
             call_id = new_call_id()
             is_live = rec.error_code is None and rec.endpoint_id == live_endpoint_id
             await self._safe_insert_call(CallRecord(
-                call_id=call_id, trace_id=ctx.trace_id, run_id=ctx.run_id,
+                call_id=call_id, request_id=ctx.request_id,
                 step_id=f"step_{rec.attempt}_{rec.endpoint_id}",
                 attempt=rec.attempt, endpoint_id=rec.endpoint_id,
                 request_hash=fingerprint(json.dumps(req.model_dump(mode="json"), ensure_ascii=False)),
                 usage=usage if is_live else _empty_usage(),
-                connect_ms=rec.connect_ms,
                 ttft_ms=rec.ttft_ms,
                 http_status=200 if is_live else None,
                 upstream_request_id=(
@@ -521,7 +546,7 @@ class GatewayService:
             ))
             if is_live:
                 cost = build_cost_record(self.registry, rec.endpoint_id, usage,
-                                         call_id=call_id, trace_id=ctx.trace_id, tenant_id=ctx.tenant_id)
+                                         call_id=call_id, request_id=ctx.request_id, tenant_id=ctx.tenant_id)
                 cost.price_version = self.pricing.version
                 await self._safe_insert_cost(cost)
 

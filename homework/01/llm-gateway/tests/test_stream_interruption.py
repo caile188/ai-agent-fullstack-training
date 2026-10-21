@@ -61,12 +61,12 @@ async def test_post_gate_interruption_records_trace_call_cost(harness, monkeypat
     assert t["endpoint_id"] == "ds-v4-flash"
 
     # 已在途尝试按 200 + 已处理 input tokens 记账
-    calls = await svc.repo.get_trace_calls(t["trace_id"])
+    calls = await svc.repo.get_trace_calls(t["request_id"])
     assert len(calls) == 1
     assert calls[0]["http_status"] == 200 and calls[0]["input_tokens"] == 8
 
     async with svc.db.conn.execute(
-        "SELECT COUNT(*) AS n FROM cost_ledger WHERE trace_id=?", (t["trace_id"],)
+        "SELECT COUNT(*) AS n FROM cost_ledger WHERE request_id=?", (t["request_id"],)
     ) as cur:
         row = await cur.fetchone()
     assert row["n"] == 1
@@ -78,10 +78,15 @@ async def test_post_gate_interruption_sse_single_error_terminal(harness, monkeyp
 
     pipe = await svc.gateway.stream_chat(make_request("standard-chat", stream=True))
     frames = [f async for f in to_sse(pipe)]
-    data_frames = [f for f in frames if f.startswith("data:")]
-    payloads = [
-        json.loads(f[5:].strip()) for f in data_frames if f[5:].strip() != "[DONE]"
-    ]
+
+    def _data_line(frame: str) -> str | None:
+        for line in frame.splitlines():
+            if line.startswith("data:"):
+                return line[5:].strip()
+        return None
+
+    data_lines = [d for f in frames if (d := _data_line(f)) is not None]
+    payloads = [json.loads(d) for d in data_lines if d != "[DONE]"]
     # 中断前内容已交付（标准 content chunk），随后恰好一帧 error 信封 + DONE
     assert any(
         p.get("choices") and p["choices"][0]["delta"].get("content") == "hi"
@@ -90,4 +95,4 @@ async def test_post_gate_interruption_sse_single_error_terminal(harness, monkeyp
     errors = [p for p in payloads if "error" in p]
     assert len(errors) == 1
     assert errors[0]["error"]["code"] == "UPSTREAM_STREAM_INTERRUPTED"
-    assert data_frames[-1].strip() == "data: [DONE]"
+    assert data_lines[-1] == "[DONE]"

@@ -11,8 +11,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 
-import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.config import GatewayConfig
 from app.core.errors import GatewayError
@@ -35,7 +34,6 @@ class AttemptRecord(BaseModel):
     retried: bool = False
     fallback_from: str | None = None
     error_code: str | None = None
-    connect_ms: float | None = None
     ttft_ms: float | None = None
     usage: TokenUsage | None = None
     http_status: int | None = None
@@ -56,19 +54,6 @@ class ExecutionEngine:
         self.limiter = limiter
         self.invoker = Invoker(config.resilience)
         self.retry = RetryPolicy(config.resilience)
-        self._client: httpx.AsyncClient | None = None
-
-    async def startup(self) -> None:
-        self._client = httpx.AsyncClient()
-
-    async def shutdown(self) -> None:
-        if self._client:
-            await self._client.aclose()
-
-    @property
-    def client(self) -> httpx.AsyncClient:
-        assert self._client is not None, "engine not started"
-        return self._client
 
     def new_budget(self) -> TimeoutBudget:
         r = self.config.resilience
@@ -101,7 +86,7 @@ class ExecutionEngine:
                 records.append(rec)
                 try:
                     resp = await self.invoker.invoke_nonstream(
-                        self.client, adapter, req, endpoint, budget, record=rec
+                        adapter, req, endpoint, budget
                     )
                     self.breaker.record_success(eid)
                     rec.usage = resp.usage
@@ -147,7 +132,7 @@ class ExecutionEngine:
         records.append(rec)
         try:
             resp = await self.invoker.invoke_nonstream(
-                self.client, adapter, req, endpoint, budget, record=rec
+                adapter, req, endpoint, budget
             )
             self.breaker.record_success(endpoint_id)
             rec.usage = resp.usage
@@ -188,7 +173,7 @@ class ExecutionEngine:
 
             try:
                 gen = await self.invoker.stream(
-                    self.client, adapter, req, endpoint, budget, record=rec
+                    adapter, req, endpoint, budget
                 )
                 # 取首事件：成功即代表 invoker 内部首包门已开（已见首内容）
                 first = await gen.__anext__()

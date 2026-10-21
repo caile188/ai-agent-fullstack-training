@@ -18,11 +18,11 @@ async def harness(tmp_path):
     object.__setattr__(svc.config.resilience.retry, "max_retries", 0)
 
     fake = FakeUpstream()
-    svc.engine._client = fake.client()
+    fake.attach(svc.registry)
     try:
         yield svc, fake
     finally:
-        await svc.engine.shutdown()
+        await svc.registry.aclose()
         await svc.db.close()
 
 

@@ -18,12 +18,12 @@ async def list_traces(request: Request, limit: int = 50):
     return {"traces": await svc.repo.recent_traces(min(limit, 200))}
 
 
-@router.get("/traces/{trace_id}")
-async def get_trace(trace_id: str, request: Request):
+@router.get("/traces/{request_id}")
+async def get_trace(request_id: str, request: Request):
     svc = request.app.state.services
-    trace = await svc.repo.get_trace(trace_id)
+    trace = await svc.repo.get_trace(request_id)
     if not trace:
         raise HTTPException(404, "trace not found")
-    trace["calls"] = await svc.repo.get_trace_calls(trace_id)
-    trace["decision"] = await svc.repo.get_decision(trace_id)
+    trace["calls"] = await svc.repo.get_trace_calls(request_id)
+    trace["decision"] = await svc.repo.get_decision(request_id)
     return trace

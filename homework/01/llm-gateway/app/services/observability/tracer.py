@@ -14,7 +14,7 @@ from app.services.observability.records import TraceRecord
 
 class Tracer:
     def __init__(self, ctx: TraceContext, requested_model: str, stream: bool, timeout_budget_ms: int) -> None:
-        self.ctx = ctx  # TraceContext：trace_id/run_id/tenant_id
+        self.ctx = ctx  # TraceContext：request_id/tenant_id
         self.requested_model = requested_model
         self.stream = stream
         self.t0 = time.monotonic()  # 请求起点
@@ -45,14 +45,6 @@ class Tracer:
             return round((self._marks[b] - self._marks[a]) * 1000.0, 2)
         return None
 
-    def _connect_ms(self) -> float | None:
-        """
-        取连接耗时
-        连接耗时来自每次 HTTP 尝试（AttemptRecord.connect_ms，由 Invoker 在响应头到达时记录），这里取最后一次成功记录值。
-        """
-        vals = [a.connect_ms for a in self.attempts if a.connect_ms is not None]
-        return vals[-1] if vals else None
-
     @property
     def total_ms(self) -> float:
         end = self._marks.get("end", time.monotonic())
@@ -73,8 +65,7 @@ class Tracer:
             ttfts = [a.ttft_ms for a in self.attempts if a.ttft_ms is not None]
             ttft = ttfts[-1] if ttfts else None
         return TraceRecord(
-            trace_id=self.ctx.trace_id,
-            run_id=self.ctx.run_id,
+            request_id=self.ctx.request_id,
             tenant_id=self.ctx.tenant_id,
             requested_model=self.requested_model,
             stream=self.stream,
@@ -85,7 +76,6 @@ class Tracer:
             queue_ms=self._ms("begin", "queued"),
             render_ms=self._ms("render_start", "render_done"),
             route_ms=self._ms("render_done", "routed") or self._ms("queued", "routed"),
-            connect_ms=self._connect_ms(),
             ttft_ms=ttft,
             generation_ms=self._ms("routed", "end") if not self.stream else self._ms("first_token", "end"),
             total_ms=self.total_ms,
@@ -108,8 +98,7 @@ class Tracer:
         self.mark("end")
         last = self.attempts[-1] if self.attempts else None
         return TraceRecord(
-            trace_id=self.ctx.trace_id,
-            run_id=self.ctx.run_id,
+            request_id=self.ctx.request_id,
             tenant_id=self.ctx.tenant_id,
             requested_model=self.requested_model,
             stream=self.stream,
@@ -118,7 +107,6 @@ class Tracer:
             queue_ms=self._ms("begin", "queued"),
             render_ms=self._ms("render_start", "render_done"),
             route_ms=self._ms("render_done", "routed") or self._ms("queued", "routed"),
-            connect_ms=self._connect_ms(),
             ttft_ms=None,
             total_ms=self.total_ms,
             attempts=self.attempts,

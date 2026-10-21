@@ -5,7 +5,6 @@ import json
 from typing import Any
 
 from app.core.errors import GatewayError
-from app.core.prompts.hashing import compute_hash, with_hash
 from app.core.prompts.versions import PromptStatus, PromptVersion
 from app.services.db.repositories import Repository
 
@@ -15,7 +14,6 @@ class PromptStore:
         self.repo = repo
 
     async def create_version(self, pv: PromptVersion) -> PromptVersion:
-        pv = with_hash(pv)
         package_id = await self.repo.upsert_package(pv.name)
         existing = await self.repo.get_prompt_version(pv.name, pv.version)
         if existing is not None:
@@ -56,6 +54,7 @@ class PromptStore:
             version=row["version"],
             status=PromptStatus(row["status"]),
             system_template=row["system_template"],
+            user_template=row["user_template"] or "",
             variables_schema=json.loads(row["variables_schema"] or "{}"),
             few_shot=json.loads(row["few_shot_json"] or "[]"),
             output_schema=json.loads(output_schema) if output_schema else None,
@@ -63,8 +62,8 @@ class PromptStore:
             default_logical_model=row["default_logical_model"],
             generation_params=json.loads(row["generation_params"] or "{}"),
             context_budget=row["context_budget"],
+            max_variable_chars=row["max_variable_chars"],
             eval_set=json.loads(row["eval_set_json"] or "[]"),
             eval_threshold=row["eval_threshold"],
             changelog=row["changelog"] or "",
-            content_hash=row["content_hash"],
         )

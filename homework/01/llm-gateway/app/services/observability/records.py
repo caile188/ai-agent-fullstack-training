@@ -11,14 +11,12 @@ from app.services.execution.engine import AttemptRecord
 
 class CallRecord(BaseModel):
     call_id: str
-    trace_id: str
-    run_id: str
+    request_id: str
     step_id: str
     attempt: int
     endpoint_id: str
     request_hash: str | None = None
     usage: TokenUsage = Field(default_factory=TokenUsage)
-    connect_ms: float | None = None
     ttft_ms: float | None = None
     http_status: int | None = None
     upstream_request_id: str | None = None
@@ -27,7 +25,7 @@ class CallRecord(BaseModel):
 
 class CostRecord(BaseModel):
     call_id: str
-    trace_id: str
+    request_id: str
     tenant_id: str
     cost: CostBreakdown
     currency: str = "USD"
@@ -35,8 +33,7 @@ class CostRecord(BaseModel):
 
 
 class TraceRecord(BaseModel):
-    trace_id: str
-    run_id: str
+    request_id: str
     tenant_id: str
     requested_model: str
     stream: bool = False
@@ -47,13 +44,13 @@ class TraceRecord(BaseModel):
 
     prompt_name: str | None = None
     prompt_version: str | None = None
+    # 本次实际渲染内容（system 含 few-shot + user 数据帧）的指纹，非合约定义 hash
     prompt_hash: str | None = None
     schema_version: str = "1.0"
 
     queue_ms: float | None = None
     render_ms: float | None = None
     route_ms: float | None = None
-    connect_ms: float | None = None
     ttft_ms: float | None = None
     generation_ms: float | None = None
     total_ms: float | None = None

@@ -6,8 +6,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from app.core.prompts.hashing import compute_hash
-from app.core.prompts.render import render_system
+from app.core.prompts.hashing import compute_rendered_hash
+from app.core.prompts.render import enforce_context_budget, render_system, render_user
 from app.core.prompts.versions import PromptVersion
 
 router = APIRouter(prefix="/v1/prompts")
@@ -27,7 +27,7 @@ async def create_version(payload: PromptVersion, request: Request):
     svc = _services(request)
     saved = await svc.prompts.create_version(payload)
     return {"name": saved.name, "version": saved.version,
-            "status": saved.status.value, "content_hash": saved.content_hash}
+            "status": saved.status.value}
 
 
 @router.post("/{name}/versions/{version}/publish")
@@ -47,11 +47,13 @@ async def list_versions(name: str, request: Request):
 async def render(name: str, body: RenderRequest, request: Request):
     svc = _services(request)
     pv = await svc.prompts.resolve(name, body.version)
-    rendered = render_system(pv, body.variables)
+    rendered_system = render_system(pv)
+    rendered_user = render_user(pv, body.variables)
+    enforce_context_budget(pv, rendered_system, rendered_user)
     return {
         "name": name,
         "version": pv.version,
-        "content_hash": pv.content_hash,
-        "rendered_system": rendered,
-        "hash_recomputed": compute_hash(pv),
+        "rendered_system": rendered_system,
+        "rendered_user": rendered_user,
+        "rendered_hash": compute_rendered_hash(rendered_system, rendered_user),
     }

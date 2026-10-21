@@ -16,13 +16,13 @@ def build_cost_record(
     usage: TokenUsage,
     *,
     call_id: str,
-    trace_id: str,
+    request_id: str,
     tenant_id: str,
 ) -> CostRecord:
     breakdown = price_usage(registry, endpoint_id, usage)
     return CostRecord(
         call_id=call_id,
-        trace_id=trace_id,
+        request_id=request_id,
         tenant_id=tenant_id,
         cost=breakdown,
     )

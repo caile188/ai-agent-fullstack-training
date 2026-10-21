@@ -13,7 +13,7 @@ def _client():
 
     c = TestClient(app)
     c.__enter__()
-    c.app.state.services.engine._client = FakeUpstream().client()
+    FakeUpstream().attach(c.app.state.services.registry)
     return c
 
 

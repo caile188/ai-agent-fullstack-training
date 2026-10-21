@@ -22,7 +22,7 @@ async def test_weighted_round_robin_distribution(harness):
     assert counts["ds-v4-pro"] == 2
     # fallback 链始终把本次选中端点放在首位
     recent = await svc.repo.recent_traces(1)
-    decision = await svc.repo.get_decision(recent[0]["trace_id"])
+    decision = await svc.repo.get_decision(recent[0]["request_id"])
     assert decision["chosen_endpoint"] in counts
 
 
@@ -44,8 +44,8 @@ async def test_429_retry_after_short_retries_same_endpoint(harness):
 
     resp = await svc.gateway.chat(make_request("standard-chat"))
     assert resp.endpoint_id == "ds-v4-flash"          # 没切换端点
-    flash_calls = [r for r in fake.calls if r.url.path.endswith("/messages")]
-    pro_calls = [r for r in fake.calls if r.url.path.endswith("/responses")]
+    flash_calls = [c for c in fake.calls if c["protocol"] == "anthropic"]
+    pro_calls = [c for c in fake.calls if c["protocol"] == "openai_responses"]
     assert len(flash_calls) == 2                       # 首次 429 + 一次重试
     assert len(pro_calls) == 0
 

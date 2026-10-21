@@ -1,9 +1,11 @@
-"""Trace 上下文：trace / run / step / call 四层 ID。
+"""可观测 ID 上下文：request / step / call 三层 ID。
 
-  trace_id : 整次用户请求
-  run_id   : 一次编排（fallback 链共享，不随重试变）
-  step_id  : 每个候选端点尝试
-  call_id  : 每次真实 HTTP 调用（一次重试产生新 call_id）
+  request_id : 一次网关模型调用（内部含 fallback 链，重试/fallback 不改变它）。
+               对应未来 Agent 模型中一次 Request；Agent Run 的 trace_id 是它的上层。
+  step_id    : 一次候选端点尝试
+  call_id    : 每次真实 HTTP 调用（一次重试产生新 call_id）
+
+供应商响应 ID（upstream_request_id）由适配器从上游响应提取，不在此处生成。
 """
 from __future__ import annotations
 
@@ -22,6 +24,10 @@ def new_id(prefix: str) -> str:
     return _new_id(prefix)
 
 
+def new_request_id() -> str:
+    return _new_id("req")
+
+
 def new_call_id() -> str:
     return _new_id("call")
 
@@ -31,15 +37,14 @@ def new_step_id() -> str:
 
 
 class TraceContext(BaseModel):
-    trace_id: str
-    run_id: str
+    request_id: str
     tenant_id: str = "default"
     step_id: str | None = None
     call_id: str | None = None
 
     @classmethod
     def begin(cls, tenant_id: str = "default") -> "TraceContext":
-        return cls(trace_id=_new_id("trace"), run_id=_new_id("run"), tenant_id=tenant_id)
+        return cls(request_id=new_request_id(), tenant_id=tenant_id)
 
     def new_step(self) -> str:
         self.step_id = _new_id("step")

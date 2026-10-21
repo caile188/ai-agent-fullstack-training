@@ -1,31 +1,20 @@
-"""内容寻址：对影响行为的全部字段做规范化序列化后计算 sha256。
+"""实发内容指纹：对一次调用真正渲染出的两帧文本计算 sha256。
 
-content_hash 纳入：模板 / 变量 Schema / few-shot / 输出 Schema /
-工具版本 / 默认模型 / 生成参数 / context 预算。状态与 changelog 不计入
-（它们不改变模型行为），故同内容重新发布 hash 一致，可去重。
+系统只保留这一个 hash——它标识“本次实际发送给模型的内容”，用于事故排查、
+相同实发输入聚类与事后复算核对。合约版本本身以 (name, version) 唯一标识，
+不再单列合约定义 hash。
 """
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 
-from app.core.prompts.versions import PromptVersion
 
-
-def _canonical(pv: PromptVersion) -> dict:
-    data = pv.model_dump(mode="json")
-    for key in ("status", "changelog", "content_hash"):
-        data.pop(key, None)
-    return copy.deepcopy(data)
-
-
-def compute_hash(pv: PromptVersion) -> str:
-    blob = json.dumps(_canonical(pv), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+def compute_rendered_hash(system_text: str, user_text: str = "") -> str:
+    blob = json.dumps(
+        {"system": system_text, "user": user_text},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
-def with_hash(pv: PromptVersion) -> PromptVersion:
-    if pv.content_hash:
-        return pv
-    return pv.model_copy(update={"content_hash": compute_hash(pv)})
