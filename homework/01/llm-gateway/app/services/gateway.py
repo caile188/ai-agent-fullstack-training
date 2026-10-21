@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -185,7 +186,6 @@ class GatewayService:
         req: ChatRequest | None = None
         idem_key: str | None = None
 
-        tracer.mark("queued")
         try:
             # Prompt 解析/渲染纳入 Trace：渲染期失败也要落 trace
             tracer.mark("render_start")
@@ -225,12 +225,12 @@ class GatewayService:
 
             # 先落 trace 以满足 trace_calls 外键，再落 calls/cost，最后覆写最终 trace
             shell = tracer.build_success(resp, output_validation="pending",
-                                         route_snapshot=decision.to_snapshot(), prompt=prompt_meta)
+                                         prompt=prompt_meta)
             await self._safe_insert_trace(shell)
             await self._record_calls(ctx, req, records)
 
             trace = tracer.build_success(resp, output_validation=validation,
-                                         route_snapshot=decision.to_snapshot(), prompt=prompt_meta)
+                                         prompt=prompt_meta)
             await self._safe_insert_trace(trace)
             if idem_key:
                 await self.repo.complete_idempotency(tenant_id, idem_key, resp.model_dump_json())
@@ -239,21 +239,18 @@ class GatewayService:
             # 执行失败时释放幂等占位，允许客户端用同一键重试（冲突类错误不释放）
             if idem_key and err.code not in ("IDEMPOTENCY_CONFLICT", "IDEMPOTENCY_IN_PROGRESS"):
                 await self._safe_release_idempotency(tenant_id, idem_key)
-            # repair 调用记录为 retried 且无 fallback 来源，以此与引擎重试区分
-            tracer.structured_repairs = sum(
-                1 for r in records if r.retried and r.fallback_from is None
-            )
+            # repair 调用以显式 kind="repair" 与引擎重试区分
+            tracer.structured_repairs = sum(1 for r in records if r.kind == "repair")
             tracer.attempts = records
             tracer.close_render_segment()
             # 验证最终失败 / repair 中超时等：已产生的上游调用与费用仍须落库
             if req is not None and records and any(r.http_status == 200 for r in records):
                 await self._safe_insert_trace(
                     tracer.build_success(None, output_validation="pending",
-                                         route_snapshot=decision.to_snapshot() if decision else None,
                                          prompt=prompt_meta)
                 )
                 await self._record_calls(ctx, req, records)
-            await self._fail(ctx, tracer, err, decision, prompt_meta)
+            await self._fail(ctx, tracer, err, prompt_meta)
             raise
 
     # ==================================================== 流式
@@ -270,7 +267,6 @@ class GatewayService:
         prompt_meta = (None, None, None)
         records: list[AttemptRecord] = []
 
-        tracer.mark("queued")
         try:
             tracer.mark("render_start")
             req, pv = await self.prepare(payload, tenant_id)
@@ -286,7 +282,7 @@ class GatewayService:
                 raise self._no_endpoint_error(decision)
         except GatewayError as err:
             tracer.close_render_segment()
-            await self._fail(ctx, tracer, err, None, prompt_meta)
+            await self._fail(ctx, tracer, err, prompt_meta)
             raise
 
         pipe = await self.engine.execute_stream(req, decision.fallback_chain, budget, records)
@@ -363,8 +359,10 @@ class GatewayService:
             await self._safe_insert_call(CallRecord(
                 call_id=call_id, request_id=ctx.request_id, step_id=step_id,
                 attempt=rec.attempt, endpoint_id=rec.endpoint_id,
+                kind=rec.kind, provider_id=self.registry.provider(rec.endpoint_id).id,
                 request_hash=request_hash,
                 usage=rec.usage or _empty_usage(),
+                wait_ms=rec.wait_ms, latency_ms=rec.latency_ms, backoff_ms=rec.backoff_ms,
                 ttft_ms=rec.ttft_ms,
                 http_status=rec.http_status,
                 upstream_request_id=rec.upstream_request_id,
@@ -485,18 +483,22 @@ class GatewayService:
                 "stream ended without a terminal finish event",
             )
         live = next((r for r in reversed(records) if r.error_code is None), None)
+        # 流式生成在本方法的 _out 循环里完成，引擎内拿不到终点：用开始时刻补算
+        # live attempt 的 latency（开始调用 -> finish/收尾），供 call 行落库。
+        if live is not None and live.started_ts is not None:
+            live.latency_ms = round((time.monotonic() - live.started_ts) * 1000.0, 2)
         has_usage = bool(
             latest_usage and (latest_usage.input_tokens or latest_usage.output_tokens)
         )
         if live is None:
             # 理论上不会发生：进入 _out 时首包门已开；兜底落失败 trace
             if terminal_err is not None:
-                await self._fail(ctx, tracer, terminal_err, decision, prompt_meta)
+                await self._fail(ctx, tracer, terminal_err, prompt_meta)
             return
         if finished is None and not has_usage:
             # 门已开但拿不到任何用量快照：无法计费，仍须落唯一失败终态
             if terminal_err is not None:
-                await self._fail(ctx, tracer, terminal_err, decision, prompt_meta)
+                await self._fail(ctx, tracer, terminal_err, prompt_meta)
             return
 
         tracer.mark("first_token")
@@ -506,20 +508,23 @@ class GatewayService:
         else:
             usage = latest_usage
             shadow = _interrupted_shadow(req, live.endpoint_id, usage, self.registry)
+        # live attempt 即成功 attempt：回填用量/状态供 tracer 汇总（provider 记账时不依赖影子响应）
+        live.usage = usage
+        live.http_status = 200
+        shadow.provider_id = self.registry.provider(live.endpoint_id).id
 
         # 先落 trace 壳以满足 trace_calls 外键，再落 calls/cost，最后覆写终态 trace
         await self._safe_insert_trace(
             tracer.build_success(shadow, output_validation="pending",
-                                 route_snapshot=decision.to_snapshot(), prompt=prompt_meta)
+                                 prompt=prompt_meta)
         )
         await self._record_stream_outcome(ctx, req, records, live.endpoint_id, usage,
                                           finished)
         if terminal_err is not None:
-            await self._fail(ctx, tracer, terminal_err, decision, prompt_meta)
+            await self._fail(ctx, tracer, terminal_err, prompt_meta)
         else:
             trace = tracer.build_success(
-                shadow, output_validation=validation,
-                route_snapshot=decision.to_snapshot(), prompt=prompt_meta,
+                shadow, output_validation=validation, prompt=prompt_meta,
             )
             await self._safe_insert_trace(trace)
 
@@ -535,8 +540,10 @@ class GatewayService:
                 call_id=call_id, request_id=ctx.request_id,
                 step_id=f"step_{rec.attempt}_{rec.endpoint_id}",
                 attempt=rec.attempt, endpoint_id=rec.endpoint_id,
+                kind=rec.kind, provider_id=self.registry.provider(rec.endpoint_id).id,
                 request_hash=fingerprint(json.dumps(req.model_dump(mode="json"), ensure_ascii=False)),
                 usage=usage if is_live else _empty_usage(),
+                wait_ms=rec.wait_ms, latency_ms=rec.latency_ms, backoff_ms=rec.backoff_ms,
                 ttft_ms=rec.ttft_ms,
                 http_status=200 if is_live else None,
                 upstream_request_id=(
@@ -561,10 +568,9 @@ class GatewayService:
             details={"rejections": [r.model_dump() for r in decision.rejections]},
         )
 
-    async def _fail(self, ctx, tracer: Tracer, err: GatewayError,
-                    decision: RouteDecision | None, prompt_meta) -> None:
-        snapshot = decision.to_snapshot() if decision else None
-        trace = tracer.build_error(err, route_snapshot=snapshot, prompt=prompt_meta)
+    async def _fail(self, ctx, tracer: Tracer, err: GatewayError, prompt_meta) -> None:
+        # 路由决策已由 _persist_decision 独立落 route_decisions 表，trace 不冗余快照
+        trace = tracer.build_error(err, prompt=prompt_meta)
         await self._safe_insert_trace(trace)
 
     async def _safe_insert_trace(self, t: TraceRecord) -> None:

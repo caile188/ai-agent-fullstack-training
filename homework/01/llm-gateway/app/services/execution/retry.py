@@ -41,12 +41,16 @@ class RetryPolicy:
         delay_ms = min(self.delay_ms(attempt), remaining)
         return delay_ms / 1000.0 if delay_ms > 0 else None
 
-    async def sleep(self, attempt: int, err: GatewayError, budget: TimeoutBudget) -> bool:
+    async def sleep(self, attempt: int, err: GatewayError, budget: TimeoutBudget) -> float | None:
+        """返回实际睡眠毫秒数（Retry-After: 0 的立即重试返回 0.0）；
+        None 表示未睡（等不起或睡后预算耗尽）-> 交给 fallback/抛出。"""
         delay = self.wait_seconds(attempt, err, budget)
         if delay is None:
-            return False  # 等不起（如 429 Retry-After 超出总预算）-> 交给 fallback
+            return None  # 等不起（如 429 Retry-After 超出总预算）-> 交给 fallback
         try:
             await asyncio.sleep(delay)
-            return not budget.expired()
+            if budget.expired():
+                return None
+            return delay * 1000.0
         except asyncio.CancelledError:
             raise

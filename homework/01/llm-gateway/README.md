@@ -46,8 +46,10 @@ SSE 每帧的元数据同样放在帧内 `gateway` 对象中。
      已产出 token 同样计费，随后保持取消语义。
 5. **可观测 + 成本**：request/step/call 三级 ID（`request_id` 标识一次网关模型调用，
    供应商响应 ID 为 `upstream_request_id`）；分段延迟
-   （queue/render/route/connect/ttft/generation/total）；成本台账；**价格版本化**
-   （配置价格快照内容寻址，cost 行绑定 `price_version`）。
+   （queue=并发闸等待之和/render/route/ttft/generation/total，另有 `backoff_ms`
+   汇总各次退避睡眠）；trace_calls 每行带 `kind`(attempt/repair)、`provider_id`、
+   `wait_ms`/`latency_ms`/`backoff_ms`，traces 行直接汇总四类 token 用量；
+   成本台账；**价格版本化**（配置价格快照内容寻址，cost 行绑定 `price_version`）。
 6. **接入治理**：多 Key 常量时间比较鉴权、按 **(租户, 逻辑模型)** 独立的令牌桶限流
    （模型级可覆盖租户默认，超限返回 429）、租户预算/区域/并发策略、
    **幂等键去重**（同键异指纹 409，pending 409，completed 重放）。

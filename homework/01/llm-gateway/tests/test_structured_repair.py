@@ -39,6 +39,8 @@ async def test_repair_then_pass(harness):
     calls = await svc.repo.get_trace_calls(t["request_id"])
     assert len(calls) == 2
     assert {c["endpoint_id"] for c in calls} == {"ds-v4-flash"}
+    assert [c["kind"] for c in calls] == ["attempt", "repair"]
+    assert all(c["provider_id"] and c["latency_ms"] is not None for c in calls)
     # 两次调用都产生了 token，故都进入成本台账
     costs = await _cost_rows(svc, t["request_id"])
     assert len(costs) == 2

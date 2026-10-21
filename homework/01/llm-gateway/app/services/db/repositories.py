@@ -134,19 +134,21 @@ class Repository:
         await self.conn.execute(
             """INSERT OR REPLACE INTO traces
             (request_id, tenant_id, requested_model, provider_id, endpoint_id, resolved_model,
-             prompt_name, prompt_version, prompt_hash, schema_version, stream,
-             queue_ms, render_ms, route_ms, ttft_ms, generation_ms, total_ms,
+             prompt_name, prompt_version, prompt_hash, record_schema_version, stream,
+             queue_ms, render_ms, route_ms, ttft_ms, generation_ms, total_ms, backoff_ms,
+             input_tokens, output_tokens, cached_tokens, reasoning_tokens,
              attempt, retries, structured_repairs, fallback_from, timeout_budget_ms,
              finish_reason, terminal_status, output_validation,
              error_code, error_stage, http_status, upstream_request_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 t.request_id, t.tenant_id, t.requested_model,
                 t.provider_id, t.endpoint_id, t.resolved_model,
-                t.prompt_name, t.prompt_version, t.prompt_hash, t.schema_version,
+                t.prompt_name, t.prompt_version, t.prompt_hash, t.record_schema_version,
                 int(t.stream),
                 t.queue_ms, t.render_ms, t.route_ms,
-                t.ttft_ms, t.generation_ms, t.total_ms,
+                t.ttft_ms, t.generation_ms, t.total_ms, t.backoff_ms,
+                t.input_tokens, t.output_tokens, t.cached_tokens, t.reasoning_tokens,
                 len(t.attempts), t.retries, t.structured_repairs,
                 (last.fallback_from if last else None) or t.fallback_from,
                 t.timeout_budget_ms,
@@ -159,16 +161,19 @@ class Repository:
     async def insert_call(self, c: CallRecord) -> None:
         await self.conn.execute(
             """INSERT INTO trace_calls
-            (call_id, request_id, step_id, attempt, endpoint_id, request_hash,
+            (call_id, request_id, step_id, attempt, endpoint_id, kind, provider_id,
+             request_hash,
              input_tokens, output_tokens, cached_tokens, reasoning_tokens,
-             ttft_ms, http_status, upstream_request_id, error_code)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             ttft_ms, wait_ms, latency_ms, backoff_ms,
+             http_status, upstream_request_id, error_code)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 c.call_id, c.request_id, c.step_id, c.attempt, c.endpoint_id,
-                c.request_hash,
+                c.kind, c.provider_id, c.request_hash,
                 c.usage.input_tokens, c.usage.output_tokens,
                 c.usage.cached_tokens, c.usage.reasoning_tokens,
-                c.ttft_ms, c.http_status, c.upstream_request_id, c.error_code,
+                c.ttft_ms, c.wait_ms, c.latency_ms, c.backoff_ms,
+                c.http_status, c.upstream_request_id, c.error_code,
             ),
         )
         await self.conn.commit()

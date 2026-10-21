@@ -31,13 +31,18 @@ class AttemptRecord(BaseModel):
     attempt: int
     endpoint_id: str
     stream: bool
+    kind: str = "attempt"            # attempt | repair
     retried: bool = False
     fallback_from: str | None = None
     error_code: str | None = None
-    ttft_ms: float | None = None
+    wait_ms: float | None = None      # 并发闸 acquire 等待
+    backoff_ms: float | None = None  # 进入本次尝试前的退避睡眠
+    ttft_ms: float | None = None      # 仅流式：首个内容事件(delta/tool_call)
+    latency_ms: float | None = None   # 非流式=invoke 全程；流式=开始到 finish
     usage: TokenUsage | None = None
     http_status: int | None = None
     upstream_request_id: str | None = None
+    started_ts: float | None = None   # 内部计时用（monotonic），不入库
 
 
 class ExecutionEngine:
@@ -70,6 +75,7 @@ class ExecutionEngine:
         attempt = 0
         last_err: GatewayError | None = None
         fallback_from: str | None = None
+        pending_backoff_ms: float | None = None  # 上一次失败后退避睡眠时长，归属下一次尝试
 
         for eid in chain:
             adapter = self.registry.adapter_for(eid)
@@ -78,16 +84,22 @@ class ExecutionEngine:
 
             while attempt < self.config.resilience.max_attempts:
                 attempt += 1
+                w0 = time.monotonic()
                 await self.limiter.acquire(eid)
+                wait_ms = (time.monotonic() - w0) * 1000.0
                 rec = AttemptRecord(
                     attempt=attempt, endpoint_id=eid, stream=False,
                     retried=retried_this_endpoint, fallback_from=fallback_from,
+                    wait_ms=wait_ms, backoff_ms=pending_backoff_ms,
                 )
+                pending_backoff_ms = None
                 records.append(rec)
                 try:
+                    t0 = time.monotonic()
                     resp = await self.invoker.invoke_nonstream(
                         adapter, req, endpoint, budget
                     )
+                    rec.latency_ms = (time.monotonic() - t0) * 1000.0
                     self.breaker.record_success(eid)
                     rec.usage = resp.usage
                     rec.http_status = 200
@@ -98,7 +110,9 @@ class ExecutionEngine:
                     last_err = err
                     self.breaker.record_failure(eid)
                     if self.retry.should_retry(attempt, err, budget):
-                        if await self.retry.sleep(attempt, err, budget):
+                        slept = await self.retry.sleep(attempt, err, budget)
+                        if slept is not None:
+                            pending_backoff_ms = slept
                             retried_this_endpoint = True
                             continue
                         # 等待超出总预算（如 429 Retry-After 太长）：不重试，落入 fallback
@@ -125,15 +139,20 @@ class ExecutionEngine:
         adapter = self.registry.adapter_for(endpoint_id)
         endpoint = self.registry.endpoint(endpoint_id)
         attempt = len(records) + 1
+        w0 = time.monotonic()
         await self.limiter.acquire(endpoint_id)
+        wait_ms = (time.monotonic() - w0) * 1000.0
         rec = AttemptRecord(
-            attempt=attempt, endpoint_id=endpoint_id, stream=False, retried=True
+            attempt=attempt, endpoint_id=endpoint_id, stream=False,
+            kind="repair", wait_ms=wait_ms,
         )
         records.append(rec)
         try:
+            t0 = time.monotonic()
             resp = await self.invoker.invoke_nonstream(
                 adapter, req, endpoint, budget
             )
+            rec.latency_ms = (time.monotonic() - t0) * 1000.0
             self.breaker.record_success(endpoint_id)
             rec.usage = resp.usage
             rec.http_status = 200
@@ -163,13 +182,16 @@ class ExecutionEngine:
             attempt += 1
             adapter = self.registry.adapter_for(eid)
             endpoint = self.registry.endpoint(eid)
+            w0 = time.monotonic()
             await self.limiter.acquire(eid)
+            wait_ms = (time.monotonic() - w0) * 1000.0
             rec = AttemptRecord(
                 attempt=attempt, endpoint_id=eid, stream=True,
-                fallback_from=fallback_from,
+                fallback_from=fallback_from, wait_ms=wait_ms,
             )
             records.append(rec)
             t0 = time.monotonic()
+            rec.started_ts = t0
 
             try:
                 gen = await self.invoker.stream(
