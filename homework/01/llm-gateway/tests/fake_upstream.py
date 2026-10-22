@@ -211,6 +211,9 @@ class _FakeAnthropicMessages:
         return self._fake.anthropic_message(kwargs)
 
     def stream(self, **kwargs):
+        # 与真实 anthropic SDK 一致：.stream() 便捷方法不接受 stream 入参
+        if "stream" in kwargs:
+            raise TypeError("stream() got an unexpected keyword argument 'stream'")
         return self._fake.anthropic_stream(kwargs)
 
 
@@ -230,6 +233,9 @@ class _FakeResponses:
         return self._fake.openai_response(kwargs)
 
     def stream(self, **kwargs):
+        # 与真实 openai SDK 一致：.stream() 便捷方法不接受 stream 入参
+        if "stream" in kwargs:
+            raise TypeError("stream() got an unexpected keyword argument 'stream'")
         return self._fake.openai_stream(kwargs)
 
 

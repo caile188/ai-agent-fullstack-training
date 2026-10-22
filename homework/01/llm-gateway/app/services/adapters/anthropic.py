@@ -179,6 +179,9 @@ class AnthropicAdapter(LLMAdapter):
         self, req: ChatRequest, endpoint: EndpointConfig, *, timeout: float
     ) -> AsyncIterator[StreamEvent]:
         kwargs = self.build_kwargs(req, endpoint, stream=True)
+        # SDK 的 .stream() 便捷方法内部固定 stream=True，签名不接受 stream 入参
+        # （与 .create() 不同）；重复传入会抛 unexpected keyword argument 'stream'
+        kwargs.pop("stream", None)
         yield StreamEvent.start(
             req.requested_model,
             resolved_model=endpoint.actual_model,
